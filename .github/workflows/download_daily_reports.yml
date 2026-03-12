@@ -1,0 +1,96 @@
+name: Download Daily Reports
+
+on:
+  schedule:
+    - cron: "20 4 * * *"
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "Start date in YYYY-MM-DD. Leave empty for catch-up mode."
+        required: false
+        type: string
+      end_date:
+        description: "End date in YYYY-MM-DD. Leave empty for today's date."
+        required: false
+        type: string
+      catchup_days:
+        description: "How many recent days to re-check when dates are empty."
+        required: false
+        default: "7"
+        type: string
+      force:
+        description: "Re-download files even if they already exist."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Resolve date range
+        id: dates
+        env:
+          INPUT_START_DATE: ${{ inputs.start_date }}
+          INPUT_END_DATE: ${{ inputs.end_date }}
+          INPUT_CATCHUP_DAYS: ${{ inputs.catchup_days }}
+        run: |
+          python - <<'PY'
+          import datetime as dt
+          import os
+          import pathlib
+          
+          start = os.environ.get("INPUT_START_DATE", "").strip()
+          end = os.environ.get("INPUT_END_DATE", "").strip()
+          catchup = os.environ.get("INPUT_CATCHUP_DAYS", "").strip() or "7"
+          today = dt.date.today()
+          
+          if start:
+              start_date = dt.datetime.strptime(start, "%Y-%m-%d").date()
+          else:
+              start_date = today - dt.timedelta(days=max(int(catchup) - 1, 0))
+          
+          if end:
+              end_date = dt.datetime.strptime(end, "%Y-%m-%d").date()
+          else:
+              end_date = today
+          
+          output = pathlib.Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a", encoding="utf-8") as handle:
+              handle.write(f"start_date={start_date.isoformat()}\n")
+              handle.write(f"end_date={end_date.isoformat()}\n")
+          PY
+
+      - name: Download reports
+        run: |
+          python download_daily_reports.py \
+            --start-date "${{ steps.dates.outputs.start_date }}" \
+            --end-date "${{ steps.dates.outputs.end_date }}" \
+            ${{ inputs.force && '--force' || '' }}
+
+      - name: Commit new reports
+        run: |
+          if [ -z "$(git status --porcelain -- daily_reports)" ]; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add daily_reports
+          git commit -m "Add daily fuel reports"
+          git push
