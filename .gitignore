@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+site/
+.eggs/
+*.egg
+*.egg-info/
+pip-wheel-metadata/
+.venv/
+venv/
+env/
+ENV/
+.ipynb_checkpoints/
+
+# Environment and local config
+.env
+.env.*
+*.local
+
+# JavaScript
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+coverage/
+.parcel-cache/
+.next/
+.nuxt/
+.svelte-kit/
+vite.svg
+*.tsbuildinfo
+
+# Frontend build outputs
+*.min.css
+*.min.js
+*.map
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local tool state
+.claude/
+.fuelprices/
