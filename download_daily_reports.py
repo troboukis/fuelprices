@@ -13,9 +13,37 @@ BASE_URL = (
     "https://www.fuelprices.gr/deltia_d/files/deltia/"
     "IMERISIO_DELTIO_PANELLINIO_{date}.pdf"
 )
+REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/145.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8,"
+        "application/signed-exchange;v=b3;q=0.7"
+    ),
+    "Accept-Language": "en-US,en;q=0.9,el;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Host": "www.fuelprices.gr",
+    "Referer": "https://www.fuelprices.gr/",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "sec-ch-ua": '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"macOS"',
+    "Connection": "keep-alive",
+}
 DEFAULT_START_DATE = dt.date(2017, 3, 14)
 DEFAULT_OUTPUT_DIR = Path("daily_reports")
 CHUNK_SIZE = 64 * 1024
+DEFAULT_RETRIES = 8
+PER_DOWNLOAD_DELAY_SECONDS = 2.0
+RETRY_DELAY_SECONDS = 5.0
 
 
 def parse_date(value: str) -> dt.date:
@@ -73,42 +101,70 @@ def print_file_progress(
     print(message, end="", flush=True)
 
 
+def log_info(message: str) -> None:
+    print(f"[INFO] {message}")
+
+
+def log_retry(message: str) -> None:
+    print(f"[RETRY] {message}")
+
+
+def log_error(message: str) -> None:
+    print(f"[ERROR] {message}")
+
+
+def log_fatal(message: str) -> None:
+    print(f"[FATAL] {message}")
+
+
 def download_report(
     report_date: dt.date,
     destination: Path,
     *,
     timeout: int,
     retries: int,
-    sleep_seconds: float,
 ) -> str:
     url = BASE_URL.format(date=report_date.strftime("%d_%m_%Y"))
     temp_path = destination.with_suffix(".tmp")
-    print(f"DEBUG: preparing download for {report_date.isoformat()} from {url}")
+    log_info(f"{report_date.isoformat()} -> {destination.name}")
+    log_info(f"URL: {url}")
 
     for attempt in range(1, retries + 1):
-        print(f"DEBUG: attempt {attempt}/{retries} for {destination.name}")
+        log_info(f"Attempt {attempt}/{retries}")
         try:
-            with urllib.request.urlopen(url, timeout=timeout) as response:
+            request = urllib.request.Request(url, headers=REQUEST_HEADERS)
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 if response.status != 200:
-                    print(
-                        f"DEBUG: non-200 response for {destination.name}: {response.status}"
+                    if response.status == 404:
+                        return "missing (404)"
+                    if attempt == retries:
+                        return f"fatal http error ({response.status})"
+                    log_retry(
+                        f"HTTP {response.status} for {destination.name}. "
+                        f"Waiting {RETRY_DELAY_SECONDS:.0f}s before retry."
                     )
-                    return f"missing ({response.status})"
+                    time.sleep(RETRY_DELAY_SECONDS)
+                    continue
 
                 content_type = response.headers.get("Content-Type", "").lower()
                 if "pdf" not in content_type and content_type:
-                    print(
-                        "DEBUG: unexpected content type for "
-                        f"{destination.name}: {content_type}"
+                    if "text/html" in content_type:
+                        return f"missing content-type ({content_type})"
+                    if attempt == retries:
+                        return f"fatal content-type ({content_type})"
+                    log_retry(
+                        f"Server returned '{content_type}' instead of PDF for "
+                        f"{destination.name}. Waiting {RETRY_DELAY_SECONDS:.0f}s before retry."
                     )
-                    return f"unexpected content-type ({content_type})"
+                    time.sleep(RETRY_DELAY_SECONDS)
+                    continue
 
                 content_length = response.headers.get("Content-Length")
                 total_bytes = int(content_length) if content_length else None
-                print(
-                    "DEBUG: response headers for "
-                    f"{destination.name}: content-type={content_type or 'unknown'}, "
-                    f"content-length={content_length or 'unknown'}"
+                size_label = content_length or "unknown"
+                log_info(
+                    f"Response OK: content-type={content_type or 'unknown'}, "
+                    f"content-length={size_label}"
                 )
 
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -124,46 +180,40 @@ def download_report(
                         print_file_progress(label, bytes_downloaded, total_bytes)
 
                 print()
-                print(
-                    "DEBUG: completed download for "
-                    f"{destination.name} ({format_bytes(bytes_downloaded)})"
+                log_info(
+                    f"Saved {destination.name} ({format_bytes(bytes_downloaded)})"
                 )
 
                 temp_path.replace(destination)
                 return "downloaded"
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
-                print(f"DEBUG: {destination.name} not found (404)")
                 return "missing (404)"
             if attempt == retries:
-                print(
-                    f"DEBUG: giving up on {destination.name} after HTTP error {exc.code}"
-                )
-                return f"http error ({exc.code})"
-            print(
-                f"DEBUG: transient HTTP error for {destination.name}: {exc.code}; retrying"
+                return f"fatal http error ({exc.code})"
+            log_retry(
+                f"HTTP error {exc.code} for {destination.name}. "
+                f"Waiting {RETRY_DELAY_SECONDS:.0f}s before retry."
             )
         except urllib.error.URLError as exc:
             if attempt == retries:
-                print(
-                    "DEBUG: giving up on "
-                    f"{destination.name} after URL error: {exc.reason}"
-                )
-                return f"url error ({exc.reason})"
-            print(
-                "DEBUG: transient URL error for "
-                f"{destination.name}: {exc.reason}; retrying"
+                return f"fatal url error ({exc.reason})"
+            log_retry(
+                f"Network error for {destination.name}: {exc.reason}. "
+                f"Waiting {RETRY_DELAY_SECONDS:.0f}s before retry."
             )
         except Exception as exc:  # pragma: no cover
             if attempt == retries:
-                print(f"DEBUG: giving up on {destination.name} after error: {exc}")
-                return f"error ({exc})"
-            print(f"DEBUG: transient error for {destination.name}: {exc}; retrying")
+                return f"fatal error ({exc})"
+            log_retry(
+                f"Unexpected error for {destination.name}: {exc}. "
+                f"Waiting {RETRY_DELAY_SECONDS:.0f}s before retry."
+            )
         finally:
             if temp_path.exists():
                 temp_path.unlink()
 
-        time.sleep(sleep_seconds)
+        time.sleep(RETRY_DELAY_SECONDS)
 
     return "failed"
 
@@ -204,14 +254,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--retries",
         type=int,
-        default=3,
-        help="Retries per file for transient failures. Default: 3.",
-    )
-    parser.add_argument(
-        "--sleep-seconds",
-        type=float,
-        default=0.2,
-        help="Sleep between retries. Default: 0.2.",
+        default=DEFAULT_RETRIES,
+        help=f"Retries per file for transient failures. Default: {DEFAULT_RETRIES}.",
     )
     return parser
 
@@ -231,7 +275,7 @@ def main() -> int:
     total_reports = len(report_dates)
 
     print(
-        "DEBUG: starting download run with "
+        "[INFO] Starting download run with "
         f"start_date={args.start_date.isoformat()} "
         f"end_date={args.end_date.isoformat()} "
         f"output_dir={args.output_dir} "
@@ -242,13 +286,11 @@ def main() -> int:
         filename = report_filename(report_date)
         destination = args.output_dir / filename
         overall_bar = render_progress(index - 1, total_reports)
-        print(
-            f"DEBUG: [{index}/{total_reports}] {overall_bar} processing {filename}"
-        )
+        print(f"[INFO] [{index}/{total_reports}] {overall_bar} {filename}")
 
         if destination.exists() and not args.force:
             skipped += 1
-            print(f"{report_date.isoformat()} {filename} skipped")
+            print(f"[SKIP] {report_date.isoformat()} {filename} already exists")
             continue
 
         result = download_report(
@@ -256,9 +298,13 @@ def main() -> int:
             destination,
             timeout=args.timeout,
             retries=args.retries,
-            sleep_seconds=args.sleep_seconds,
         )
-        print(f"{report_date.isoformat()} {filename} {result}")
+        if result == "downloaded":
+            print(f"[OK] {report_date.isoformat()} {filename} downloaded")
+        elif result.startswith("missing"):
+            print(f"[MISSING] {report_date.isoformat()} {filename} {result}")
+        else:
+            print(f"[ERROR] {report_date.isoformat()} {filename} {result}")
 
         if result == "downloaded":
             downloaded += 1
@@ -266,16 +312,25 @@ def main() -> int:
             missing += 1
         else:
             failed += 1
+            log_fatal(
+                f"Stopping run. {filename} failed after {args.retries} attempts. "
+                f"Last status: {result}"
+            )
+            return 1
 
         completed_bar = render_progress(index, total_reports)
         print(
-            "DEBUG: progress "
-            f"{completed_bar} completed={index}/{total_reports} "
-            f"downloaded={downloaded} skipped={skipped} missing={missing} failed={failed}"
+            f"[INFO] Progress {completed_bar} {index}/{total_reports} "
+            f"(downloaded={downloaded}, skipped={skipped}, missing={missing})"
         )
 
+        log_info(
+            f"Waiting {PER_DOWNLOAD_DELAY_SECONDS:.0f}s before next report"
+        )
+        time.sleep(PER_DOWNLOAD_DELAY_SECONDS)
+
     print(
-        "Summary: "
+        "[SUMMARY] "
         f"downloaded={downloaded} skipped={skipped} missing={missing} failed={failed}"
     )
 
