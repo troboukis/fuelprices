@@ -44,6 +44,7 @@ CHUNK_SIZE = 64 * 1024
 DEFAULT_RETRIES = 8
 PER_DOWNLOAD_DELAY_SECONDS = 2.0
 RETRY_DELAY_SECONDS = 5.0
+REPORT_GLOB = "IMERISIO_DELTIO_PANELLINIO_*.pdf"
 
 
 def parse_date(value: str) -> dt.date:
@@ -64,6 +65,24 @@ def daterange(start_date: dt.date, end_date: dt.date):
 
 def report_filename(report_date: dt.date) -> str:
     return f"IMERISIO_DELTIO_PANELLINIO_{report_date.strftime('%d_%m_%Y')}.pdf"
+
+
+def find_latest_local_report_date(output_dir: Path) -> dt.date | None:
+    latest_date: dt.date | None = None
+
+    for path in output_dir.glob(REPORT_GLOB):
+        try:
+            report_date = dt.datetime.strptime(
+                path.stem.removeprefix("IMERISIO_DELTIO_PANELLINIO_"),
+                "%d_%m_%Y",
+            ).date()
+        except ValueError:
+            continue
+
+        if latest_date is None or report_date > latest_date:
+            latest_date = report_date
+
+    return latest_date
 
 
 def format_bytes(num_bytes: int) -> str:
@@ -225,8 +244,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--start-date",
         type=parse_date,
-        default=DEFAULT_START_DATE,
-        help="First date to fetch in YYYY-MM-DD format. Default: 2017-03-14.",
+        default=None,
+        help=(
+            "First date to fetch in YYYY-MM-DD format. "
+            "Default: latest local PDF date, or 2017-03-14 if none exist."
+        ),
     )
     parser.add_argument(
         "--end-date",
@@ -263,6 +285,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+
+    if args.start_date is None:
+        args.start_date = find_latest_local_report_date(args.output_dir) or DEFAULT_START_DATE
 
     if args.start_date > args.end_date:
         parser.error("--start-date cannot be after --end-date.")
